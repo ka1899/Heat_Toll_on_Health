@@ -1,0 +1,32 @@
+project:
+  type: book
+  output-dir: docs
+
+execute:
+  echo: true
+  warning: false
+  messgae: false
+
+book:
+  title: "Heat's Toll on Health"
+  author:
+    - Khushi Advani (ka3090)
+    - Ishmeen Garewal (ig2548)
+  repo-url: https://github.com/ishmeen-11/EDAV-Project.git
+  date: 12/11/2025
+  page-footer:
+    right: |
+      This book was built with <a href="https://quarto.org/">Quarto</a>.
+  repo-actions: [edit, issue]
+  chapters:
+    - index.qmd
+    - data.qmd
+    - results.qmd
+    - conclusion.qmd
+
+format:
+  html:
+    theme: cerulean
+    code-fold: true
+
+
