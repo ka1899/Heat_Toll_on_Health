@@ -1,5 +1,34 @@
 [theme]
-primaryColor = "#d9480f"
+# Shared by light and dark mode (viewers can switch under Settings in the app menu)
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFontWeights = [700, 650, 600]
+baseRadius = "0.6rem"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#c2410c"
+backgroundColor = "#fcfaf7"
+secondaryBackgroundColor = "#f4ede6"
+textColor = "#1f2328"
+borderColor = "#e6ddd3"
+linkColor = "#b4380a"
+
+[theme.light.sidebar]
+backgroundColor = "#f7f1eb"
+secondaryBackgroundColor = "#efe6dd"
+
+[theme.dark]
+primaryColor = "#f97316"
+backgroundColor = "#14161a"
+secondaryBackgroundColor = "#22252b"
+textColor = "#e8e6e3"
+borderColor = "#33373e"
+linkColor = "#fb923c"
+
+[theme.dark.sidebar]
+backgroundColor = "#1a1c21"
+secondaryBackgroundColor = "#262a30"
 
 [server]
 headless = true
