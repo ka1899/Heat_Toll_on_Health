@@ -1,162 +1,469 @@
-import streamlit as st
-import pandas as pd
 import os
-import io
+
+import altair as alt
 import groq
+import pandas as pd
+import streamlit as st
 from dotenv import load_dotenv
 
+from heat_data import (AGE_LABELS, AGE_ORDER, DEMOGRAPHIC_OUTCOMES, OUTCOMES,
+                       load_heat_events, load_outcomes, load_poverty, state_year_panel)
+from ml_model import fit_model, sensitivity_curve, simulate_heat_increase
+
 load_dotenv()
-from PIL import Image
-from ml_model import load_and_merge_data, add_socioeconomic_indicators, build_advanced_model, simulate_climate_scenarios
+st.set_page_config(page_title="Heat's Toll on Health", page_icon="🔥", layout="wide")
 
-# Setting page config to be wide and clean for a modern dashboard look
-st.set_page_config(page_title="Heat's Toll on Health", layout="wide")
+US_STATES_TOPO = "https://cdn.jsdelivr.net/npm/vega-datasets@2/data/us-10m.json"
+HEAT_COLOR = "#e03131"
+OUTCOME_COLORS = {"Hospitalizations": "#1971c2", "ER Visits": "#0c8599", "Deaths": "#7048e8"}
+SEX_COLORS = alt.Scale(domain=["Female", "Male"], range=["#e8590c", "#1c7ed6"])
+AGES = [AGE_LABELS[a] for a in AGE_ORDER]
 
-st.markdown("""
-<style>
-    .reportview-container {
-        background: #FAFAFA
-    }
-    .sidebar .sidebar-content {
-        background: #F0F2F6
-    }
-</style>
-""", unsafe_allow_html=True)
 
-st.title("🔥 Heat's Toll on Health Dashboard")
-st.markdown("Exploring the relationship between Extreme Heat Events, Health Outcomes, and Socioeconomic Vulnerabilities.")
-
+# ---------------------------------------------------------------- data + model
 @st.cache_data
-def load_app_data():
-    df = load_and_merge_data("./EDAV-Project/data_clean/")
-    df = add_socioeconomic_indicators(df)
-    model = build_advanced_model(df)
-    return df, model
+def load_all():
+    return load_outcomes(), load_heat_events(), load_poverty()
 
-df, model = load_app_data()
 
-# Data Summary for LLM Context
-data_summary = f"""
-The dataset contains state-year observations from 2000-2022.
-Columns include: State, Year, EHE (Extreme Heat Events), Hosps (Hospitalizations), 
-ER.Visits (ER Visits), Deaths, Poverty_Rate, Pct_No_AC.
-Total rows: {len(df)}. Total states: {len(df['State'].unique())}.
-Latest year data:
-{df[df['Year'] == 2022].head().to_string()}
-"""
+@st.cache_resource
+def get_model(outcome: str):
+    outcomes, heat, poverty = load_all()
+    return fit_model(state_year_panel(outcomes, heat, poverty, outcome), outcome)
 
-# Configure Groq (Ensure API key is set in environment)
-api_key = os.environ.get("GROQ_API_KEY", "")
 
-tab1, tab2, tab3 = st.tabs(["📊 Data Visualizations", "🧠 ML Simulation Engine", "🤖 AI Assistant"])
+outcomes_df, heat_df, poverty_df = load_all()
+ALL_STATES = sorted(heat_df["State"].unique())
+YEAR_MIN, YEAR_MAX = int(heat_df["Year"].min()), int(heat_df["Year"].max())
 
-with tab1:
-    st.header("Baseline Insights from the CDC")
-    st.markdown("These visualizations were rendered natively in R based on the underlying EPH trajectory.")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Surge in Health Impacts (Since 2000)")
-        try:
-            img1 = Image.open("plots/plot1_trends.png")
-            st.image(img1, use_container_width=True)
-        except Exception:
-            st.warning("plot1_trends.png not generated.")
 
-    with col2:
-        st.subheader("Decade-Long Intensification of Heat Events")
-        try:
-            img3 = Image.open("plots/plot3_heatmap.png")
-            st.image(img3, use_container_width=True)
-        except Exception:
-            st.warning("plot3_heatmap.png not generated.")
-            
-    st.subheader("Standardized Heat Events vs Hospitalizations")
-    try:
-        img2 = Image.open("plots/plot2_standardized.png")
-        st.image(img2, use_container_width=True)
-    except Exception:
-        st.warning("plot2_standardized.png not generated.")
+# ---------------------------------------------------------------- sidebar slicers
+def reset_filters():
+    for key in ("states", "years", "ages", "sexes"):
+        st.session_state.pop(key, None)
 
-with tab2:
-    st.header("Climate Consequence Simulator")
-    st.markdown("Adjust the slider to simulate the health impact of increased extreme heat events across US States. The underlying **Distributed Lag Non-Linear Model** accounts for J-Curve temperature trajectories and poverty interactions.")
-    
-    temp_increase = st.select_slider(
-        "Select Temperature Increase Scenario",
-        options=["Baseline", "+1°C (approx +20% Heat Events)", "+2°C (approx +50% Heat Events)", "+3°C (approx +100% Heat Events)"]
-    )
-    
-    multiplier = 1.0
-    if "+1°C" in temp_increase:
-        multiplier = 1.2
-    elif "+2°C" in temp_increase:
-        multiplier = 1.5
-    elif "+3°C" in temp_increase:
-        multiplier = 2.0
-        
-    if multiplier > 1.0:
-        sim_results = simulate_climate_scenarios(df, model, increase_factor=multiplier)
-        recent_year = sim_results['Year'].max()
-        sim_recent = sim_results[sim_results['Year'] == recent_year]
-        
-        st.write(f"### Projected Additional Hospitalizations for {recent_year} under {temp_increase}")
-        display_df = sim_recent[['State', 'Original_EHE', 'Baseline_Hosps', 'Simulated_Hosps', 'Diff']].copy()
-        display_df['Diff'] = display_df['Diff'].astype(int)
-        display_df['Simulated_Hosps'] = display_df['Simulated_Hosps'].astype(int)
-        display_df['Baseline_Hosps'] = display_df['Baseline_Hosps'].astype(int)
-        
-        st.dataframe(display_df.sort_values(by='Diff', ascending=False).head(15), use_container_width=True)
-        st.markdown("**Interaction Check: Do states with higher poverty suffer worse marginal impacts?**")
-        st.scatter_chart(data=sim_recent, x='Poverty_Rate', y='Diff', color='State')
+
+with st.sidebar:
+    st.header("Filters")
+    outcome = st.segmented_control("Health outcome", list(OUTCOMES), default="Hospitalizations",
+                                   key="outcome") or "Hospitalizations"
+    states = st.multiselect("States", ALL_STATES, key="states",
+                            placeholder=f"All {len(ALL_STATES)} states")
+    years = st.slider("Years", YEAR_MIN, YEAR_MAX, (YEAR_MIN, YEAR_MAX), key="years")
+    has_demographics = outcome in DEMOGRAPHIC_OUTCOMES
+    ages = st.pills("Age group", AGES, selection_mode="multi", default=AGES, key="ages",
+                    disabled=not has_demographics)
+    sexes = st.pills("Sex", ["Female", "Male"], selection_mode="multi",
+                     default=["Female", "Male"], key="sexes", disabled=not has_demographics)
+    if not has_demographics:
+        st.caption("Deaths are only published as totals, so age and sex filters don't apply.")
+    st.button("Reset filters", on_click=reset_filters, width="stretch", key="reset")
+    st.divider()
+    st.caption("Sources: CDC Environmental Public Health Tracking (heat events, health "
+               "outcomes) · U.S. Census Bureau SAIPE (poverty, population).")
+
+selected_states = states or ALL_STATES
+mask = (
+    (outcomes_df["Outcome"] == outcome)
+    & outcomes_df["State"].isin(selected_states)
+    & outcomes_df["Year"].between(*years)
+)
+if has_demographics:
+    mask &= outcomes_df["Age_Group"].isin(ages or AGES) & outcomes_df["Sex"].isin(sexes or ["Female", "Male"])
+filtered = outcomes_df[mask]
+heat_filtered = heat_df[heat_df["State"].isin(selected_states) & heat_df["Year"].between(*years)]
+panel = state_year_panel(filtered, heat_filtered, poverty_df, outcome)
+
+# ---------------------------------------------------------------- header
+st.title("🔥 Heat's Toll on Health")
+scope = "all states" if not states else (", ".join(states) if len(states) <= 3 else f"{len(states)} states")
+st.markdown(f"Extreme heat and heat-related **{outcome.lower()}** · {scope} · {years[0]}–{years[1]}")
+
+if panel.empty:
+    st.warning(f"No {outcome.lower()} are reported for this selection. Try other states or years.")
+    st.stop()
+
+tab_overview, tab_sim, tab_ai, tab_nyc, tab_methods = st.tabs(
+    ["📊 Overview", "🌡️ Heat Scenario Simulator", "🤖 AI Analyst", "🗽 NYC Spotlight", "📖 Methods"])
+
+color = OUTCOME_COLORS[outcome]
+
+# ================================================================ OVERVIEW
+with tab_overview:
+    yearly = panel.groupby("Year").agg(Count=("Count", "sum"), EHE=("EHE", "sum"),
+                                       Population=("Population", "sum"),
+                                       States=("State", "nunique")).reset_index()
+    yearly["Rate"] = yearly["Count"] / yearly["Population"] * 1e5
+
+    n_years = min(3, len(yearly))
+    first, last = yearly.head(n_years), yearly.tail(n_years)
+    rate_change = (last["Rate"].mean() / first["Rate"].mean() - 1) * 100 if len(yearly) > n_years else None
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"Total {outcome.lower()}", f"{yearly['Count'].sum():,.0f}",
+              chart_data=yearly["Count"].tolist(), chart_type="bar", border=True,
+              help="Sum over the selected states, years, ages and sexes.")
+    k2.metric("Rate per 100k residents", f"{yearly['Rate'].mean():.1f}",
+              delta=f"{rate_change:+.0f}% vs first {n_years} yrs" if rate_change is not None else None,
+              delta_color="inverse", chart_data=yearly["Rate"].round(2).tolist(), border=True,
+              help=f"Average of the last {n_years} years compared with the first {n_years} years in the range. "
+                   "Population is all residents of reporting states.")
+    k3.metric("Extreme heat events", f"{yearly['EHE'].sum():,.0f}",
+              chart_data=yearly["EHE"].tolist(), border=True,
+              help="County-level events (2+ consecutive days ≥ 90°F), summed across counties.")
+    k4.metric("States reporting", f"{panel['State'].nunique()}", border=True,
+              help="Not every state reports every outcome every year, so totals partly reflect coverage. "
+                   "The per-100k rate adjusts for this.")
+
+    # --- trend: heat events above, outcome rate below, shared x-axis
+    x = alt.X("Year:O", title=None, axis=alt.Axis(labelAngle=0, values=list(range(2000, 2023, 2))))
+    heat_trend = alt.Chart(yearly).mark_area(color=HEAT_COLOR, opacity=0.25, line={"color": HEAT_COLOR}).encode(
+        x=x, y=alt.Y("EHE:Q", title="Heat events"),
+        tooltip=["Year", alt.Tooltip("EHE:Q", title="Heat events", format=",")]
+    ).properties(height=130, title="Extreme heat events")
+    rate_trend = alt.Chart(yearly).mark_bar(color=color).encode(
+        x=x, y=alt.Y("Rate:Q", title="Per 100k"),
+        tooltip=["Year", alt.Tooltip("Count:Q", title=outcome, format=","),
+                 alt.Tooltip("Rate:Q", title="Per 100k", format=".2f"),
+                 alt.Tooltip("States:Q", title="States reporting")]
+    ).properties(height=200, title=f"{outcome} per 100k residents")
+    st.altair_chart(alt.vconcat(heat_trend, rate_trend, spacing=8).resolve_scale(x="shared"), width="stretch")
+
+    # --- map + ranking
+    by_state = panel.groupby(["StateFIPS", "State"]).agg(
+        Count=("Count", "sum"), EHE=("EHE", "sum"), Population=("Population", "mean"),
+        Poverty_Rate=("Poverty_Rate", "mean"), Years=("Year", "nunique")).reset_index()
+    by_state["Rate"] = by_state["Count"] / by_state["Years"] / by_state["Population"] * 1e5
+    by_state["EHE_per_year"] = by_state["EHE"] / by_state["Years"]
+
+    map_metrics = {
+        f"{outcome} per 100k (yearly avg)": ("Rate", "orangered", ".2f"),
+        "Heat events per year": ("EHE_per_year", "reds", ",.0f"),
+        "Poverty rate (%)": ("Poverty_Rate", "purples", ".1f"),
+    }
+    col_map, col_rank = st.columns([3, 2])
+    with col_map:
+        metric_label = st.segmented_control("Map shows", list(map_metrics), default=list(map_metrics)[0],
+                                            key="map_metric") or list(map_metrics)[0]
+        field, scheme, fmt = map_metrics[metric_label]
+        geo = alt.topo_feature(US_STATES_TOPO, "states")
+        lookup_cols = ["State", "Rate", "EHE_per_year", "Poverty_Rate", "Count", "Years"]
+        background = alt.Chart(geo).mark_geoshape(fill="#adb5bd", opacity=0.25, stroke="white", strokeWidth=0.5)
+        states_layer = alt.Chart(geo).mark_geoshape(stroke="white", strokeWidth=0.7).transform_lookup(
+            lookup="id", from_=alt.LookupData(by_state, "StateFIPS", lookup_cols)
+        ).transform_filter("isValid(datum.State)").encode(
+            color=alt.Color(f"{field}:Q", scale=alt.Scale(scheme=scheme), title=None,
+                            legend=alt.Legend(orient="bottom", gradientLength=260, format=fmt)),
+            tooltip=[alt.Tooltip("State:N"),
+                     alt.Tooltip("Rate:Q", title=f"{outcome} per 100k/yr", format=".2f"),
+                     alt.Tooltip("EHE_per_year:Q", title="Heat events/yr", format=",.0f"),
+                     alt.Tooltip("Poverty_Rate:Q", title="Poverty rate %", format=".1f"),
+                     alt.Tooltip("Years:Q", title="Years reported")])
+        st.altair_chart((background + states_layer).project("albersUsa").properties(height=380),
+                        width="stretch")
+        st.caption("Grey states are not in the CDC tracking extract for this outcome.")
+
+    with col_rank:
+        st.markdown(f"**Highest {outcome.lower()} rates**")
+        top = by_state.nlargest(12, "Rate")
+        st.altair_chart(alt.Chart(top).mark_bar(color=color).encode(
+            x=alt.X("Rate:Q", title="Per 100k residents per year"),
+            y=alt.Y("State:N", sort="-x", title=None),
+            tooltip=["State", alt.Tooltip("Rate:Q", format=".2f"), alt.Tooltip("Count:Q", format=",")]
+        ).properties(height=380), width="stretch")
+
+    # --- state x year heatmap
+    st.markdown(f"**{outcome} per 100k by state and year**")
+    order = by_state.sort_values("Rate", ascending=False)["State"].tolist()
+    st.altair_chart(alt.Chart(panel).mark_rect().encode(
+        x=alt.X("Year:O", title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("State:N", sort=order, title=None),
+        # Cap colors at the 95th percentile so one extreme state doesn't wash out the rest
+        color=alt.Color("Rate_per_100k:Q", title="Per 100k", scale=alt.Scale(
+            scheme="orangered", domain=[0, float(panel["Rate_per_100k"].quantile(0.95))], clamp=True)),
+        tooltip=["State", "Year", alt.Tooltip("Count:Q", title=outcome, format=","),
+                 alt.Tooltip("Rate_per_100k:Q", title="Per 100k", format=".2f"),
+                 alt.Tooltip("EHE:Q", title="Heat events", format=",")]
+    ).properties(height=max(160, 16 * len(order))), width="stretch")
+    st.caption("Blank cells: the state did not report that year (or deaths were suppressed because there were fewer than 10).")
+
+    col_demo, col_scatter = st.columns(2)
+    with col_demo:
+        st.markdown("**Who is affected**")
+        if has_demographics:
+            demo = filtered.groupby(["Age_Group", "Sex"], as_index=False)["Count"].sum()
+            st.altair_chart(alt.Chart(demo).mark_bar().encode(
+                x=alt.X("Age_Group:N", sort=AGES, title="Age group", axis=alt.Axis(labelAngle=0)),
+                xOffset="Sex:N",
+                y=alt.Y("Count:Q", title=outcome),
+                color=alt.Color("Sex:N", scale=SEX_COLORS, legend=alt.Legend(orient="top", title=None)),
+                tooltip=["Age_Group", "Sex", alt.Tooltip("Count:Q", format=",")]
+            ).properties(height=300), width="stretch")
+        else:
+            st.info("Age and sex breakdowns are available for hospitalizations and ER visits only.")
+
+    with col_scatter:
+        st.markdown("**Hotter years, more cases?**")
+        pts = panel[panel["EHE"] > 0]
+        st.altair_chart(alt.Chart(pts).mark_circle(size=55, opacity=0.75).encode(
+            x=alt.X("EHE:Q", scale=alt.Scale(type="log"), title="Heat events in the state that year (log)"),
+            y=alt.Y("Rate_per_100k:Q", scale=alt.Scale(type="log"), title=f"{outcome} per 100k (log)"),
+            color=alt.Color("Poverty_Rate:Q", scale=alt.Scale(scheme="purples"), title="Poverty %",
+                            legend=alt.Legend(orient="top")),
+            tooltip=["State", "Year", alt.Tooltip("EHE:Q", format=","),
+                     alt.Tooltip("Rate_per_100k:Q", format=".2f"), alt.Tooltip("Poverty_Rate:Q", format=".1f")]
+        ).properties(height=300), width="stretch")
+        st.caption("Each dot is one state-year. Both axes are logarithmic.")
+
+    with st.expander("View and download the filtered data"):
+        table = panel.rename(columns={"Count": outcome, "EHE": "Heat_Events"}).drop(columns="StateFIPS")
+        st.dataframe(table, hide_index=True, column_config={
+            "Year": st.column_config.NumberColumn(format="%d"),
+            "Rate_per_100k": st.column_config.NumberColumn("Per 100k", format="%.2f"),
+            "Population": st.column_config.NumberColumn(format="localized"),
+        })
+        st.download_button("Download CSV", table.to_csv(index=False), "heat_health_filtered.csv", "text/csv")
+
+# ================================================================ SIMULATOR
+with tab_sim:
+    model = get_model(outcome)
+    st.markdown(
+        f"What if extreme heat events became more common? This projects **{outcome.lower()}** in a typical "
+        "recent year (each state's last 5 reported years) using a statistical model fit on "
+        f"{model.n_obs} state-years from {model.n_states} states. Use the sidebar to choose which states to show.")
+
+    pct = st.slider("Increase in extreme heat events", 0, 200, 50, step=10, format="+%d%%", key="pct",
+                    help="Heat events in every county scale up by this percentage.")
+    full_panel = state_year_panel(outcomes_df[outcomes_df["Outcome"] == outcome], heat_df, poverty_df, outcome)
+    sim = simulate_heat_increase(full_panel, model, pct)
+    sim = sim[sim["State"].isin(selected_states)]
+
+    if pct == 0:
+        st.info("Move the slider to add heat events.")
     else:
-        st.info("Move the slider to simulate future climate scenarios.")
+        extra, baseline = sim["Extra"].sum(), sim["Baseline"].sum()
+        s1, s2, s3 = st.columns(3)
+        s1.metric(f"Extra {outcome.lower()} per year", f"+{extra:,.0f}", border=True,
+                  help="Approximate 95% range: "
+                       f"{sim['Extra_low'].sum():,.0f} to {sim['Extra_high'].sum():,.0f}")
+        s2.metric("Change vs. today", f"{extra / baseline * 100:+.1f}%", border=True,
+                  help=f"Baseline: {baseline:,.0f} per year across the selected states.")
+        top_state = sim.iloc[0]
+        s3.metric("Largest increase", top_state["State"], f"+{top_state['Extra']:,.0f} per year",
+                  delta_color="inverse", border=True)
 
-with tab3:
-    st.header("Agentic AI Data Analyst")
-    st.markdown("Ask natural language questions about the underlying CDC heat impacts dataset!")
-    
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            st.markdown(f"**Projected extra {outcome.lower()} per year, by state**")
+            bars = alt.Chart(sim).encode(y=alt.Y("State:N", sort="-x", title=None))
+            st.altair_chart((bars.mark_bar().encode(
+                x=alt.X("Extra:Q", title=f"Extra {outcome.lower()} per year"),
+                color=alt.Color("Poverty_Rate:Q", scale=alt.Scale(scheme="purples"), title="Poverty %",
+                                legend=alt.Legend(orient="top")),
+                tooltip=["State", alt.Tooltip("Baseline:Q", format=",.0f"),
+                         alt.Tooltip("Projected:Q", format=",.0f"),
+                         alt.Tooltip("Pct_Change:Q", title="% change", format="+.1f"),
+                         alt.Tooltip("Extra_low:Q", title="95% low", format=",.0f"),
+                         alt.Tooltip("Extra_high:Q", title="95% high", format=",.0f")])
+                + bars.mark_rule(color="#868e96").encode(x="Extra_low:Q", x2="Extra_high:Q")
+            ).properties(height=max(200, 18 * len(sim))), width="stretch")
+            st.caption("Grey lines are 95% confidence intervals. Large states dominate the counts. "
+                       "The chart on the right compares states by percentage change instead.")
+
+        with c2:
+            st.markdown("**Does poverty amplify heat's effect?**")
+            curve = sensitivity_curve(model, (poverty_df["Poverty_Rate"].quantile(0.02),
+                                              poverty_df["Poverty_Rate"].quantile(0.98)), pct)
+            band = alt.Chart(curve).mark_area(opacity=0.2, color=color).encode(
+                x=alt.X("Poverty_Rate:Q", title="State poverty rate (%)", scale=alt.Scale(zero=False)),
+                y=alt.Y("Low:Q", title=f"% change in {outcome.lower()}"), y2="High:Q")
+            line = alt.Chart(curve).mark_line(color=color).encode(x="Poverty_Rate:Q", y="Pct_Change:Q")
+            dots = alt.Chart(sim).mark_circle(size=45, color="#495057").encode(
+                x="Poverty_Rate:Q", y="Pct_Change:Q",
+                tooltip=["State", alt.Tooltip("Poverty_Rate:Q", format=".1f"),
+                         alt.Tooltip("Pct_Change:Q", title="% change", format="+.1f")])
+            st.altair_chart((band + line + dots).properties(height=360), width="stretch")
+            p_int = model.result.pvalues["log_heat:poverty_c"]
+            verdict = ("a statistically significant amplifier" if p_int < 0.05
+                       else "not a statistically significant amplifier")
+            st.caption(f"Line: % change at a +{pct}% heat increase for a state with that poverty rate "
+                       f"(shaded: 95% CI). Dots: individual states. Dots near zero are states with very few heat "
+                       f"events, where a percentage increase adds little. For {outcome.lower()}, poverty is "
+                       f"{verdict} (p = {p_int:.3f}).")
+
+        with st.expander("Projection table"):
+            st.dataframe(sim[["State", "Heat_Events", "Poverty_Rate", "Baseline", "Projected", "Extra",
+                              "Extra_low", "Extra_high", "Pct_Change"]], hide_index=True, column_config={
+                "Heat_Events": st.column_config.NumberColumn("Heat events/yr", format="%.0f"),
+                "Poverty_Rate": st.column_config.NumberColumn("Poverty %", format="%.1f"),
+                "Baseline": st.column_config.NumberColumn(format="%.0f"),
+                "Projected": st.column_config.NumberColumn(format="%.0f"),
+                "Extra": st.column_config.NumberColumn(format="%.0f"),
+                "Extra_low": st.column_config.NumberColumn("95% low", format="%.0f"),
+                "Extra_high": st.column_config.NumberColumn("95% high", format="%.0f"),
+                "Pct_Change": st.column_config.NumberColumn("% change", format="%+.1f"),
+            })
+
+    with st.expander("How the model works"):
+        b = model.result.params
+        st.markdown(f"""
+For each state and year, the model predicts the **{outcome.lower()} rate** from:
+
+- **Heat:** log(1 + heat events). A coefficient of **{b['log_heat']:.3f}** means about
+  **{(1.10 ** b['log_heat'] - 1) * 100:.1f}% more {outcome.lower()} for every 10% more heat events**
+  in a state with average poverty.
+- **Poverty rate** from the Census Bureau, and its **interaction with heat**. A positive interaction
+  means heat hits harder where poverty is higher.
+- **State fixed effects** absorb permanent differences between states, such as climate,
+  hospital coding practices and air-conditioning prevalence.
+- **Year fixed effects** absorb shocks that hit every state in the same year, such as coding
+  changes or COVID-19.
+
+It is a quasi-Poisson regression on counts, with population as an exposure offset. Standard errors are
+clustered by state. The effect of heat is estimated only from **within-state, year-to-year swings**,
+so it isn't confused with Arizona simply being hotter than Maine.
+""")
+        st.dataframe(model.coef_table(), hide_index=True, column_config={
+            c: st.column_config.NumberColumn(format="%.4f") for c in ["Estimate", "CI low", "CI high", "p-value"]})
+        st.caption("The poverty main effect compares a state with itself over time (for example, "
+                   "recession years against boom years). Read it with caution, not as \"poverty protects\".")
+
+# ================================================================ AI ANALYST
+def build_ai_context() -> str:
+    by_year = panel.groupby("Year").agg(Count=("Count", "sum"), Heat_Events=("EHE", "sum"),
+                                        States=("State", "nunique")).reset_index()
+    by_st = panel.groupby("State").agg(Count=("Count", "sum"), Heat_Events=("EHE", "sum"),
+                                       Avg_Rate_per_100k=("Rate_per_100k", "mean"),
+                                       Avg_Poverty=("Poverty_Rate", "mean"),
+                                       Years_Reported=("Year", "nunique")).reset_index()
+    model = get_model(outcome)
+    demo = ""
+    if has_demographics:
+        demo_t = filtered.groupby(["Age_Group", "Sex"])["Count"].sum().unstack()
+        demo = f"\nBreakdown by age group and sex:\n{demo_t.to_csv()}"
+    return f"""Current dashboard selection
+- Outcome: {outcome}
+- States: {', '.join(selected_states)}
+- Years: {years[0]}-{years[1]}
+- Age groups: {', '.join(ages) if has_demographics else 'n/a'}; Sex: {', '.join(sexes) if has_demographics else 'n/a'}
+
+Totals by year:
+{by_year.to_csv(index=False)}
+Totals by state (Avg_Rate_per_100k = average of yearly rates):
+{by_st.round(2).to_csv(index=False)}{demo}
+Model coefficients for {outcome} (quasi-Poisson, state and year fixed effects, population offset):
+{model.coef_table().round(4).to_csv(index=False)}"""
+
+
+def queue_suggestion():
+    # Send a clicked suggestion once, then clear the pill so reruns don't resend it
+    st.session_state.pending_prompt = st.session_state.suggestion
+    st.session_state.suggestion = None
+
+
+with tab_ai:
+    st.markdown("Ask questions about the data **currently selected in the sidebar**. "
+                "The assistant only sees the summary tables below.")
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    groq_model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+    context = build_ai_context()
+    with st.expander("What the assistant can see"):
+        st.code(context, language=None)
+
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    st.pills("Try asking", [
+        "Which state has the highest rate, and how does its poverty compare?",
+        "How have cases changed since the early 2000s?",
+        "Explain the model results in plain language.",
+    ], key="suggestion", on_change=queue_suggestion)
+    if st.button("Clear chat", type="tertiary"):
+        st.session_state.messages = []
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    chat = st.container()
+    for m in st.session_state.messages:
+        chat.chat_message(m["role"]).markdown(m["content"])
 
-    if prompt := st.chat_input("E.g: 'Which state had the highest hospitalizations in 2022?'"):
-        st.chat_message("user").markdown(prompt)
+    prompt = st.chat_input("Ask about heat and health in your selection…") or st.session_state.pop("pending_prompt", None)
+    if prompt:
+        chat.chat_message("user").markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
-        
         if not api_key:
-            response = "⚠️ Please provide a Groq API Key in the `.env` file to use the AI Assistant."
+            answer = "⚠️ Add `GROQ_API_KEY` to a `.env` file to enable the assistant (see `.env.example`)."
         else:
+            system = ("You are a careful public-health data analyst inside a dashboard about extreme heat and "
+                      "heat-related health outcomes in US states (CDC Environmental Public Health Tracking, "
+                      "Census SAIPE poverty). Answer ONLY from the data below. If the answer is not in the "
+                      "data, say so plainly; never invent numbers. Quote the figures you use in plain text (no citation brackets). Keep answers "
+                      "concise. Remember: states report different years, so raw yearly totals partly reflect "
+                      "reporting coverage. Prefer rates per 100k when comparing.\n\n" + context)
+            history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
             try:
-                client = groq.Groq(api_key=api_key)
-                system_prompt = f"""
-                You are a data analyst assistant for a Heat-Health dashboard.
-                You have access to a dataset containing Heat Events, Hospitalizations, ER Visits, and Deaths for US States from 2000 to 2022.
-                Here is a summary of the dataset:
-                {data_summary}
-                
-                Please answer the user's question accurately based on this information. 
-                If you need to guess values or infer trends based on general US knowledge and the schema, you may do so carefully.
-                """
-                
-                groq_messages = [{"role": "system", "content": system_prompt}]
-                for m in st.session_state.messages:
-                    if m["role"] == "user":
-                        groq_messages.append({"role": "user", "content": m["content"]})
-                    elif m["role"] == "assistant":
-                        groq_messages.append({"role": "assistant", "content": m["content"]})
-                        
-                completion = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=groq_messages,
-                    temperature=0.3,
-                )
-                response = completion.choices[0].message.content
+                with chat, st.spinner("Thinking…"):
+                    reply = groq.Groq(api_key=api_key).chat.completions.create(
+                        model=groq_model, temperature=0.2,
+                        messages=[{"role": "system", "content": system}] + history)
+                answer = reply.choices[0].message.content
             except Exception as e:
-                response = f"Error communicating with AI: {str(e)}"
-                
-        with st.chat_message("assistant"):
-            st.markdown(response)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+                answer = f"Error contacting Groq ({groq_model}): {e}"
+        chat.chat_message("assistant").markdown(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+# ================================================================ NYC
+with tab_nyc:
+    st.markdown("A closer look at one city. NYC has dense housing, little tree canopy in places, and sharp "
+                "income gaps between neighborhoods, which makes **where** heat lands very uneven. *(Sidebar filters don't apply to this tab.)*")
+    nyc = pd.read_csv("nyc/nyc_heat_er_visits_2022.csv")
+    citywide = nyc.loc[nyc["GeoTypeDesc"] == "Citywide", "Age-adjusted rate per 100,000"].iloc[0]
+    boroughs = nyc[nyc["GeoTypeDesc"] == "Borough"].rename(columns={
+        "Age-adjusted rate per 100,000": "Rate", "Number": "Visits"})
+
+    n1, n2 = st.columns([2, 3])
+    with n1:
+        st.markdown("**Heat-stress ER visits, 2022 (age-adjusted per 100k)**")
+        bars = alt.Chart(boroughs).mark_bar(color=OUTCOME_COLORS["ER Visits"]).encode(
+            x=alt.X("Rate:Q", title="Per 100k residents"),
+            y=alt.Y("Borough:N", sort="-x", title=None),
+            tooltip=["Borough", "Visits", alt.Tooltip("Rate:Q", format=".1f")])
+        rule = alt.Chart(pd.DataFrame({"x": [citywide]})).mark_rule(strokeDash=[4, 3], color="#868e96").encode(x="x:Q")
+        st.altair_chart((bars + rule).properties(height=260), width="stretch")
+        top = boroughs.nlargest(1, "Rate").iloc[0]
+        st.caption(f"Dashed line: citywide rate ({citywide}). {top['Borough']} is highest at {top['Rate']}, "
+                   f"{top['Rate'] / citywide:.1f}× the city average. Source: NYC Environment & Health Data Portal.")
+    with n2:
+        st.image("nyc/Map2_Health_Outcomes.jpg", width="stretch",
+                 caption="Borough ER visit rates over land surface temperature (QGIS).")
+    st.image("nyc/Map1_Heat_Exposure.jpg", width="stretch",
+             caption="Land surface temperature from Landsat 8 (June 19, 2022) with tree canopy and ZIP code boundaries. "
+                     "Hot spots line up with dense, low-canopy neighborhoods.")
+
+# ================================================================ METHODS
+with tab_methods:
+    st.markdown("""
+#### Data
+| Source | What | Level |
+|---|---|---|
+| CDC Environmental Public Health Tracking | Extreme heat events: 2+ consecutive days ≥ 90°F (NOAA) | County-year, summed to state |
+| CDC Environmental Public Health Tracking | Heat-related hospitalizations and ER visits, by age and sex | State-year |
+| CDC Environmental Public Health Tracking | Heat-related deaths (suppressed when < 10) | State-year |
+| U.S. Census Bureau SAIPE | Poverty rate, all ages, and population | State-year |
+| NYC Environment & Health Data Portal, Landsat 8 | Borough ER visit rates, land surface temperature | Borough, 30 m raster |
+
+Only states that take part in CDC tracking are included (31 for heat events and hospitalizations,
+30 for ER visits). Results may not generalize to the rest of the country.
+
+#### Model
+`log E[count] = log(population) + β₁·log(1+heat) + β₂·poverty + β₃·log(1+heat)·poverty + state FE + year FE`
+
+This is a quasi-Poisson GLM with standard errors clustered by state, fit separately for each outcome. The
+simulator scales each state's recent average heat events and applies the fitted rate ratio to its
+recent average count.
+
+#### Limitations
+- **Association, not proof.** Fixed effects remove a lot of confounding, but not all of it.
+- **No lag structure.** This uses annual data, so it can't separate heat waves from cumulative heat.
+- **Reporting varies.** States joined the tracking network in different years, so use the rates.
+- **Air conditioning** isn't published by state and year, so it's absorbed by the state fixed
+  effects rather than modeled directly.
+- **Heat scenarios are hypothetical.** The simulator varies event frequency, not temperature.
+""")

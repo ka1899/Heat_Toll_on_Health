@@ -1,0 +1,7 @@
+"TimePeriod","GeoTypeDesc","GeoID","GeoRank","BoroID","Borough","Geography","Area","Number","Estimated annual rate per 100,000","Age-adjusted rate per 100,000"
+"2022","Citywide","1","0","-","-","New York City","New York City","505","6.1","5.7"
+"2022","Borough","1","1","1","Bronx","Bronx","Bronx","110","8.0","7.9"
+"2022","Borough","5","1","5","Staten Island","Staten Island","Staten Island","34","6.9","6.7"
+"2022","Borough","3","1","3","Manhattan","Manhattan","Manhattan","115","7.2","6.5"
+"2022","Borough","2","1","2","Brooklyn","Brooklyn","Brooklyn","137","5.3","5.1"
+"2022","Borough","4","1","4","Queens","Queens","Queens","109","4.8","4.5"

@@ -4,3 +4,7 @@ __pycache__/
 .DS_Store
 *.csv
 !EDAV-Project/data_clean/*.csv
+data_external/
+.claude/
+!data/*.csv
+!nyc/*.csv

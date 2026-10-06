@@ -1,62 +1,98 @@
-# Heat Toll on Health - Interactive Dashboard
+# Heat's Toll on Health: Interactive Dashboard
 
-This repository contains an interactive [Streamlit](https://streamlit.io/) dashboard that visualizes the CDC Environmental Public Health (EPH) dataset, simulating the toll of Extreme Heat Events on hospitalizations across the United States.
+An interactive [Streamlit](https://streamlit.io/) dashboard on how extreme heat events relate to
+heat-related hospitalizations, ER visits and deaths across U.S. states (2000–2022), and whether
+poverty makes those effects worse.
 
-It combines pre-rendered R visualizations (`ggplot2`) with an advanced Python Machine Learning model (Distributed Lag Non-Linear Model equivalent via polynomial splines) that estimates local county/state vulnerabilities when factoring in socioeconomic metrics like poverty and lack of AC.
+**What's inside**
 
-Finally, it integrates the **Groq AI (Llama 3)** model so that users can chat directly with an Agentic AI Data Analyst about the dataset.
+| Tab | What it does |
+|---|---|
+| 📊 **Overview** | Headline metrics, heat and health trends, a state map, a state × year heatmap, age/sex breakdown and heat-vs-health scatter. Everything responds to the sidebar filters, and the filtered data can be downloaded as CSV. |
+| 🌡️ **Heat Scenario Simulator** | Increase heat events by 0–200% and see projected extra cases per state with 95% confidence intervals, plus how the effect changes with a state's poverty rate. |
+| 🤖 **AI Analyst** | Chat with an LLM (via Groq) that sees summary tables of your current filter selection and is told not to guess. |
+| 🗽 **NYC Spotlight** | Borough-level heat-stress ER visits alongside Landsat land-surface-temperature and tree-canopy maps. |
+| 📖 **Methods** | Data sources, model specification and limitations. |
 
-## Setup & Installation
+**Sidebar filters (slicers):** health outcome · states · year range · age group · sex.
 
-**Prerequisites:**
-- R and `Rscript` installed (for regenerating plots)
-- Python 3.9+
-- A valid [Groq API Key](https://console.groq.com/) for the AI Agent
+## Quick start
 
-### 1. Environment Setup
-
-Clone this repository and create a Python virtual environment:
+Requires Python 3.9+.
 
 ```bash
 git clone https://github.com/ka1899/Heat_Toll_on_Health.git
 cd Heat_Toll_on_Health
 
-# Create and activate virtual environment
 python3 -m venv venv
-source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 
-# Install required Python packages
-pip install pandas numpy statsmodels scikit-learn streamlit matplotlib seaborn groq python-dotenv
-```
-
-### 2. Configure the LLM Agent
-
-Create a `.env` file in the root directory and add your Groq API key:
-
-```env
-GROQ_API_KEY=your_api_key_here
-```
-
-### 3. Generate Visualizations (Optional)
-If you want to regenerate the baseline R plots from the curated CDC data, you can run the R script:
-
-```bash
-Rscript generate_plots.R
-```
-*(This will populate the `plots/` folder with updated PNGs used in the Streamlit UI).*
-
-### 4. Run the Dashboard
-
-To launch the dashboard locally:
-
-```bash
+cp .env.example .env              # then add your Groq API key (only needed for the AI tab)
 streamlit run app.py
 ```
-This will open up a local web server (usually at `http://localhost:8501`).
 
-## Project Structure
-- `app.py`: Main Streamlit application containing UI logic, tabs, simulation interactive elements, and Groq SDK wiring.
-- `ml_model.py`: Handles data pipeline engineering, simulation projection logic, and fits the underlying statistical model (OLS with polynomial temperature curves and socioeconomic fixed effects).
-- `generate_plots.R`: Standalone R script built that renders base state heatmaps, indexes, and trends to PNGs.
-- `EDAV-Project/`: Base directory containing the clean CDC CSV extracts (`data_clean/`).
-- `plots/`: Output directory where R visualizations reside.
+The app opens at http://localhost:8501. Everything except the AI Analyst works without an API key.
+The map tiles load from a CDN, so you need an internet connection.
+
+## Data
+
+| Source | Variables | Level |
+|---|---|---|
+| [CDC Environmental Public Health Tracking](https://ephtracking.cdc.gov/) | Extreme heat events (2+ consecutive days ≥ 90°F, NOAA); heat-related hospitalizations and ER visits by age and sex; heat-related deaths | County-year (heat), state-year (health) |
+| [U.S. Census Bureau SAIPE](https://www.census.gov/programs-surveys/saipe.html) | Poverty rate (all ages), population | State-year |
+| [NYC Environment & Health Data Portal](https://a816-dohbesp.nyc.gov/IndicatorPublic/), USGS Landsat 8 | Borough heat-stress ER visit rates (2022); land surface temperature (June 19, 2022) | Borough / 30 m raster |
+
+The cleaned CDC extracts are in `EDAV-Project/data_clean/`. The poverty table `data/state_poverty.csv` is
+built from the Census Bureau's public SAIPE files by:
+
+```bash
+python scripts/build_poverty.py
+```
+
+## Model
+
+For each outcome, a quasi-Poisson regression on state-year counts:
+
+```
+log E[count] = log(population)
+             + β₁·log(1 + heat events)
+             + β₂·poverty rate
+             + β₃·log(1 + heat events)·poverty rate
+             + state fixed effects + year fixed effects
+```
+
+- **State fixed effects** absorb permanent differences between states, such as climate, hospital
+  coding and air-conditioning prevalence. **Year fixed effects** absorb nationwide shocks.
+  The heat effect is therefore estimated from within-state, year-to-year swings in heat.
+- Standard errors are clustered by state.
+- Because heat enters on a log scale, raising heat events by *x*% multiplies expected cases by
+  about (1 + *x*)^(β₁ + β₃·poverty). The effect rises with diminishing returns, and is steeper in
+  higher-poverty states when β₃ > 0.
+
+Current estimates (`python ml_model.py` prints these):
+
+| Outcome | Heat (β₁) | Heat × poverty (β₃) | Reading |
+|---|---|---|---|
+| Hospitalizations | 0.183 (p < 0.001) | 0.013 (p = 0.002) | +10% heat events → ≈ +1.8% hospitalizations; more in higher-poverty states |
+| ER visits | 0.134 (p < 0.001) | 0.005 (p = 0.25) | +10% → ≈ +1.3%; poverty interaction not significant |
+| Deaths | 0.281 (p = 0.012) | 0.035 (p = 0.14) | +10% → ≈ +2.7%; poverty interaction not significant |
+
+**Limitations:** these are associations, not causal proof. There is no lag structure, because the data
+is annual. Only the 30–31 states in the CDC tracking network are covered. Deaths below 10 are suppressed.
+Air conditioning isn't available by state and year, so the state fixed effects absorb it instead.
+
+## Project structure
+
+```
+app.py                  Streamlit dashboard (filters, tabs, charts, Groq chat)
+heat_data.py            Loads CDC + Census data into tidy, filterable tables
+ml_model.py             Model fitting, scenario simulation, poverty sensitivity curve
+scripts/build_poverty.py  Builds data/state_poverty.csv from Census SAIPE files
+data/                   Census poverty + population by state-year
+nyc/                    NYC maps (exported from QGIS) and borough ER data
+EDAV-Project/           Original Quarto EDA project and cleaned CDC extracts
+generate_plots.R        Optional: static ggplot2 figures for reports → plots/
+```
+
+To regenerate the static R figures (optional): `Rscript generate_plots.R` (needs `tidyverse` and `scales`).

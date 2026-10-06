@@ -1,21 +1,5 @@
-library(classInt)
-library(treemap)
-library(tidyverse)
-library(lubridate)
-library(sf)
-library(maps)
-library(choroplethr)
-library(choroplethrMaps)
+library(tidyverse)  # dplyr, tidyr, ggplot2
 library(scales)
-library(patchwork) 
-library(ggplot2)
-library(dplyr)
-library(tidyr)
-library(stringr)
-library(corrplot)
-library(grid)        
-library(ggrepel)
-library(vcd)
 
 # Create output directory
 dir.create("plots", showWarnings = FALSE)
