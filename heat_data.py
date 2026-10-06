@@ -2,8 +2,11 @@
 Loads the CDC Environmental Public Health Tracking extracts and Census poverty
 estimates into tidy tables the dashboard can slice.
 
-Heat events: county-level counts of extreme heat events (2+ consecutive days
-with max temperature >= 90F, NOAA), summed here to state-year.
+Heat: the CDC extract's "EHE" column. Despite the name, values are counts of
+extreme heat DAYS per county per year (they reach 194, which is impossible for
+multi-day events). Counties are averaged to the state level, so a state's
+Heat_Days is "how many extreme heat days the typical county had that year".
+Summing across counties instead would count one heat wave hundreds of times.
 Health outcomes: state-year counts of heat-related hospitalizations and ER
 visits (by age group and sex) and deaths (totals only).
 """
@@ -28,7 +31,7 @@ AGE_LABELS = {"0 TO 4": "0–4", "5 TO 14": "5–14", "15 TO 34": "15–34",
 
 
 def load_heat_events() -> pd.DataFrame:
-    """County-year extreme heat event counts."""
+    """County-year extreme heat day counts (column EHE)."""
     return pd.read_csv(os.path.join(CDC_DIR, "heat_events_clean.csv"))
 
 
@@ -56,11 +59,12 @@ def load_poverty() -> pd.DataFrame:
 
 def state_year_panel(outcomes: pd.DataFrame, heat: pd.DataFrame, poverty: pd.DataFrame,
                      outcome: str) -> pd.DataFrame:
-    """One row per state-year with the outcome count, heat events, poverty rate,
+    """One row per state-year with the outcome count, heat days per county, poverty rate,
     population and rate per 100k. Only state-years where the outcome is reported."""
     counts = (outcomes[outcomes["Outcome"] == outcome]
               .groupby(["StateFIPS", "State", "Year"], as_index=False)["Count"].sum())
-    heat_sy = heat.groupby(["StateFIPS", "Year"], as_index=False)["EHE"].sum()
+    heat_sy = (heat.groupby(["StateFIPS", "Year"], as_index=False)["EHE"].mean()
+               .rename(columns={"EHE": "Heat_Days"}))
     panel = (counts.merge(heat_sy, on=["StateFIPS", "Year"], how="inner")
              .merge(poverty, on=["StateFIPS", "Year"], how="left"))
     panel["Rate_per_100k"] = panel["Count"] / panel["Population"] * 1e5

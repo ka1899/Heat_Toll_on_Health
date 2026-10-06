@@ -20,6 +20,14 @@ SEX_COLORS = alt.Scale(domain=["Female", "Male"], range=["#e8590c", "#1c7ed6"])
 AGES = [AGE_LABELS[a] for a in AGE_ORDER]
 
 
+def compact(n: float) -> str:
+    """106509 -> '106.5K' so headline numbers fit their cards."""
+    for div, suffix in ((1e6, "M"), (1e3, "K")):
+        if abs(n) >= div:
+            return f"{n / div:.1f}{suffix}"
+    return f"{n:,.0f}"
+
+
 # ---------------------------------------------------------------- data + model
 @st.cache_data
 def load_all():
@@ -59,7 +67,7 @@ with st.sidebar:
         st.caption("Deaths are only published as totals, so age and sex filters don't apply.")
     st.button("Reset filters", on_click=reset_filters, width="stretch", key="reset")
     st.divider()
-    st.caption("Sources: CDC Environmental Public Health Tracking (heat events, health "
+    st.caption("Sources: CDC Environmental Public Health Tracking (extreme heat days, heat-related health "
                "outcomes) · U.S. Census Bureau SAIPE (poverty, population).")
 
 selected_states = states or ALL_STATES
@@ -77,7 +85,8 @@ panel = state_year_panel(filtered, heat_filtered, poverty_df, outcome)
 # ---------------------------------------------------------------- header
 st.title("🔥 Heat's Toll on Health")
 scope = "all states" if not states else (", ".join(states) if len(states) <= 3 else f"{len(states)} states")
-st.markdown(f"Extreme heat and heat-related **{outcome.lower()}** · {scope} · {years[0]}–{years[1]}")
+label = f"heat-related {outcome.lower()}"
+st.markdown(f"Extreme heat and **{label}** · {scope} · {years[0]}–{years[1]}")
 
 if panel.empty:
     st.warning(f"No {outcome.lower()} are reported for this selection. Try other states or years.")
@@ -90,9 +99,12 @@ color = OUTCOME_COLORS[outcome]
 
 # ================================================================ OVERVIEW
 with tab_overview:
-    yearly = panel.groupby("Year").agg(Count=("Count", "sum"), EHE=("EHE", "sum"),
-                                       Population=("Population", "sum"),
+    yearly = panel.groupby("Year").agg(Count=("Count", "sum"), Population=("Population", "sum"),
                                        States=("State", "nunique")).reset_index()
+    # Heat for the selection = average heat days across all counties in the reporting states
+    county_heat = heat_filtered[heat_filtered["State"].isin(panel["State"].unique())]
+    yearly = yearly.merge(county_heat.groupby("Year", as_index=False)["EHE"].mean()
+                          .rename(columns={"EHE": "Heat_Days"}), on="Year", how="left")
     yearly["Rate"] = yearly["Count"] / yearly["Population"] * 1e5
 
     n_years = min(3, len(yearly))
@@ -100,45 +112,45 @@ with tab_overview:
     rate_change = (last["Rate"].mean() / first["Rate"].mean() - 1) * 100 if len(yearly) > n_years else None
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric(f"Total {outcome.lower()}", f"{yearly['Count'].sum():,.0f}",
+    k1.metric("Total cases", compact(yearly["Count"].sum()),
               chart_data=yearly["Count"].tolist(), chart_type="bar", border=True,
-              help="Sum over the selected states, years, ages and sexes.")
-    k2.metric("Rate per 100k residents", f"{yearly['Rate'].mean():.1f}",
-              delta=f"{rate_change:+.0f}% vs first {n_years} yrs" if rate_change is not None else None,
+              help=f"{yearly['Count'].sum():,.0f} {label} across the selected states, years, ages and sexes.")
+    k2.metric("Rate per 100k", f"{yearly['Rate'].mean():.1f}",
+              delta=f"{rate_change:+.0f}%" if rate_change is not None else None,
               delta_color="inverse", chart_data=yearly["Rate"].round(2).tolist(), border=True,
-              help=f"Average of the last {n_years} years compared with the first {n_years} years in the range. "
-                   "Population is all residents of reporting states.")
-    k3.metric("Extreme heat events", f"{yearly['EHE'].sum():,.0f}",
-              chart_data=yearly["EHE"].tolist(), border=True,
-              help="County-level events (2+ consecutive days ≥ 90°F), summed across counties.")
-    k4.metric("States reporting", f"{panel['State'].nunique()}", border=True,
-              help="Not every state reports every outcome every year, so totals partly reflect coverage. "
+              help=f"Average yearly {label} per 100k residents of the reporting states. The % change compares "
+                   f"the last {n_years} years with the first {n_years} years in the range.")
+    k3.metric("Heat days", f"{yearly['Heat_Days'].mean():.0f} / yr",
+              chart_data=yearly["Heat_Days"].round(1).tolist(), border=True,
+              help="Extreme heat days per county per year, on average (CDC/NOAA). "
+                   "Averaged across counties, not summed: one heat wave hitting 500 counties is still one heat wave.")
+    k4.metric("States", f"{panel['State'].nunique()}", border=True,
+              help="States reporting this outcome. Not every state reports every outcome every year, so totals partly reflect coverage. "
                    "The per-100k rate adjusts for this.")
 
-    # --- trend: heat events above, outcome rate below, shared x-axis
+    # --- trend: heat days above, outcome rate below, shared x-axis
     x = alt.X("Year:O", title=None, axis=alt.Axis(labelAngle=0, values=list(range(2000, 2023, 2))))
     heat_trend = alt.Chart(yearly).mark_area(color=HEAT_COLOR, opacity=0.25, line={"color": HEAT_COLOR}).encode(
-        x=x, y=alt.Y("EHE:Q", title="Heat events"),
-        tooltip=["Year", alt.Tooltip("EHE:Q", title="Heat events", format=",")]
-    ).properties(height=130, title="Extreme heat events")
+        x=x, y=alt.Y("Heat_Days:Q", title="Days"),
+        tooltip=["Year", alt.Tooltip("Heat_Days:Q", title="Heat days per county", format=".1f")]
+    ).properties(height=130, title="Extreme heat days per county (average)")
     rate_trend = alt.Chart(yearly).mark_bar(color=color).encode(
         x=x, y=alt.Y("Rate:Q", title="Per 100k"),
         tooltip=["Year", alt.Tooltip("Count:Q", title=outcome, format=","),
                  alt.Tooltip("Rate:Q", title="Per 100k", format=".2f"),
                  alt.Tooltip("States:Q", title="States reporting")]
-    ).properties(height=200, title=f"{outcome} per 100k residents")
+    ).properties(height=200, title=f"Heat-related {outcome.lower()} per 100k residents")
     st.altair_chart(alt.vconcat(heat_trend, rate_trend, spacing=8).resolve_scale(x="shared"), width="stretch")
 
     # --- map + ranking
     by_state = panel.groupby(["StateFIPS", "State"]).agg(
-        Count=("Count", "sum"), EHE=("EHE", "sum"), Population=("Population", "mean"),
+        Count=("Count", "sum"), Heat_Days=("Heat_Days", "mean"), Population=("Population", "mean"),
         Poverty_Rate=("Poverty_Rate", "mean"), Years=("Year", "nunique")).reset_index()
     by_state["Rate"] = by_state["Count"] / by_state["Years"] / by_state["Population"] * 1e5
-    by_state["EHE_per_year"] = by_state["EHE"] / by_state["Years"]
 
     map_metrics = {
         f"{outcome} per 100k (yearly avg)": ("Rate", "orangered", ".2f"),
-        "Heat events per year": ("EHE_per_year", "reds", ",.0f"),
+        "Heat days per county (yearly avg)": ("Heat_Days", "reds", ".0f"),
         "Poverty rate (%)": ("Poverty_Rate", "purples", ".1f"),
     }
     col_map, col_rank = st.columns([3, 2])
@@ -147,7 +159,7 @@ with tab_overview:
                                             key="map_metric") or list(map_metrics)[0]
         field, scheme, fmt = map_metrics[metric_label]
         geo = alt.topo_feature(US_STATES_TOPO, "states")
-        lookup_cols = ["State", "Rate", "EHE_per_year", "Poverty_Rate", "Count", "Years"]
+        lookup_cols = ["State", "Rate", "Heat_Days", "Poverty_Rate", "Count", "Years"]
         background = alt.Chart(geo).mark_geoshape(fill="#adb5bd", opacity=0.25, stroke="white", strokeWidth=0.5)
         states_layer = alt.Chart(geo).mark_geoshape(stroke="white", strokeWidth=0.7).transform_lookup(
             lookup="id", from_=alt.LookupData(by_state, "StateFIPS", lookup_cols)
@@ -156,7 +168,7 @@ with tab_overview:
                             legend=alt.Legend(orient="bottom", gradientLength=260, format=fmt)),
             tooltip=[alt.Tooltip("State:N"),
                      alt.Tooltip("Rate:Q", title=f"{outcome} per 100k/yr", format=".2f"),
-                     alt.Tooltip("EHE_per_year:Q", title="Heat events/yr", format=",.0f"),
+                     alt.Tooltip("Heat_Days:Q", title="Heat days/county/yr", format=".0f"),
                      alt.Tooltip("Poverty_Rate:Q", title="Poverty rate %", format=".1f"),
                      alt.Tooltip("Years:Q", title="Years reported")])
         st.altair_chart((background + states_layer).project("albersUsa").properties(height=380),
@@ -164,7 +176,7 @@ with tab_overview:
         st.caption("Grey states are not in the CDC tracking extract for this outcome.")
 
     with col_rank:
-        st.markdown(f"**Highest {outcome.lower()} rates**")
+        st.markdown(f"**Highest {label} rates**")
         top = by_state.nlargest(12, "Rate")
         st.altair_chart(alt.Chart(top).mark_bar(color=color).encode(
             x=alt.X("Rate:Q", title="Per 100k residents per year"),
@@ -173,7 +185,7 @@ with tab_overview:
         ).properties(height=380), width="stretch")
 
     # --- state x year heatmap
-    st.markdown(f"**{outcome} per 100k by state and year**")
+    st.markdown(f"**Heat-related {outcome.lower()} per 100k by state and year**")
     order = by_state.sort_values("Rate", ascending=False)["State"].tolist()
     st.altair_chart(alt.Chart(panel).mark_rect().encode(
         x=alt.X("Year:O", title=None, axis=alt.Axis(labelAngle=0)),
@@ -183,7 +195,7 @@ with tab_overview:
             scheme="orangered", domain=[0, float(panel["Rate_per_100k"].quantile(0.95))], clamp=True)),
         tooltip=["State", "Year", alt.Tooltip("Count:Q", title=outcome, format=","),
                  alt.Tooltip("Rate_per_100k:Q", title="Per 100k", format=".2f"),
-                 alt.Tooltip("EHE:Q", title="Heat events", format=",")]
+                 alt.Tooltip("Heat_Days:Q", title="Heat days/county", format=".1f")]
     ).properties(height=max(160, 16 * len(order))), width="stretch")
     st.caption("Blank cells: the state did not report that year (or deaths were suppressed because there were fewer than 10).")
 
@@ -204,19 +216,19 @@ with tab_overview:
 
     with col_scatter:
         st.markdown("**Hotter years, more cases?**")
-        pts = panel[panel["EHE"] > 0]
+        pts = panel[(panel["Heat_Days"] > 0) & (panel["Count"] > 0)]
         st.altair_chart(alt.Chart(pts).mark_circle(size=55, opacity=0.75).encode(
-            x=alt.X("EHE:Q", scale=alt.Scale(type="log"), title="Heat events in the state that year (log)"),
+            x=alt.X("Heat_Days:Q", scale=alt.Scale(type="log"), title="Heat days per county that year (log)"),
             y=alt.Y("Rate_per_100k:Q", scale=alt.Scale(type="log"), title=f"{outcome} per 100k (log)"),
             color=alt.Color("Poverty_Rate:Q", scale=alt.Scale(scheme="purples"), title="Poverty %",
                             legend=alt.Legend(orient="top")),
-            tooltip=["State", "Year", alt.Tooltip("EHE:Q", format=","),
+            tooltip=["State", "Year", alt.Tooltip("Heat_Days:Q", title="Heat days/county", format=".1f"),
                      alt.Tooltip("Rate_per_100k:Q", format=".2f"), alt.Tooltip("Poverty_Rate:Q", format=".1f")]
         ).properties(height=300), width="stretch")
         st.caption("Each dot is one state-year. Both axes are logarithmic.")
 
     with st.expander("View and download the filtered data"):
-        table = panel.rename(columns={"Count": outcome, "EHE": "Heat_Events"}).drop(columns="StateFIPS")
+        table = panel.rename(columns={"Count": outcome, "Heat_Days": "Heat_Days_per_County"}).drop(columns="StateFIPS")
         st.dataframe(table, hide_index=True, column_config={
             "Year": st.column_config.NumberColumn(format="%d"),
             "Rate_per_100k": st.column_config.NumberColumn("Per 100k", format="%.2f"),
@@ -228,18 +240,18 @@ with tab_overview:
 with tab_sim:
     model = get_model(outcome)
     st.markdown(
-        f"What if extreme heat events became more common? This projects **{outcome.lower()}** in a typical "
+        f"What if extreme heat days became more common? This projects **{label}** in a typical "
         "recent year (each state's last 5 reported years) using a statistical model fit on "
         f"{model.n_obs} state-years from {model.n_states} states. Use the sidebar to choose which states to show.")
 
-    pct = st.slider("Increase in extreme heat events", 0, 200, 50, step=10, format="+%d%%", key="pct",
-                    help="Heat events in every county scale up by this percentage.")
+    pct = st.slider("Increase in extreme heat days", 0, 200, 50, step=10, format="+%d%%", key="pct",
+                    help="Extreme heat days in every county scale up by this percentage.")
     full_panel = state_year_panel(outcomes_df[outcomes_df["Outcome"] == outcome], heat_df, poverty_df, outcome)
     sim = simulate_heat_increase(full_panel, model, pct)
     sim = sim[sim["State"].isin(selected_states)]
 
     if pct == 0:
-        st.info("Move the slider to add heat events.")
+        st.info("Move the slider to add heat days.")
     else:
         extra, baseline = sim["Extra"].sum(), sim["Baseline"].sum()
         s1, s2, s3 = st.columns(3)
@@ -288,13 +300,13 @@ with tab_sim:
                        else "not a statistically significant amplifier")
             st.caption(f"Line: % change at a +{pct}% heat increase for a state with that poverty rate "
                        f"(shaded: 95% CI). Dots: individual states. Dots near zero are states with very few heat "
-                       f"events, where a percentage increase adds little. For {outcome.lower()}, poverty is "
+                       f"days, where a percentage increase adds little. For {outcome.lower()}, poverty is "
                        f"{verdict} (p = {p_int:.3f}).")
 
         with st.expander("Projection table"):
-            st.dataframe(sim[["State", "Heat_Events", "Poverty_Rate", "Baseline", "Projected", "Extra",
+            st.dataframe(sim[["State", "Heat_Days", "Poverty_Rate", "Baseline", "Projected", "Extra",
                               "Extra_low", "Extra_high", "Pct_Change"]], hide_index=True, column_config={
-                "Heat_Events": st.column_config.NumberColumn("Heat events/yr", format="%.0f"),
+                "Heat_Days": st.column_config.NumberColumn("Heat days/county/yr", format="%.0f"),
                 "Poverty_Rate": st.column_config.NumberColumn("Poverty %", format="%.1f"),
                 "Baseline": st.column_config.NumberColumn(format="%.0f"),
                 "Projected": st.column_config.NumberColumn(format="%.0f"),
@@ -309,8 +321,8 @@ with tab_sim:
         st.markdown(f"""
 For each state and year, the model predicts the **{outcome.lower()} rate** from:
 
-- **Heat:** log(1 + heat events). A coefficient of **{b['log_heat']:.3f}** means about
-  **{(1.10 ** b['log_heat'] - 1) * 100:.1f}% more {outcome.lower()} for every 10% more heat events**
+- **Heat:** log(1 + extreme heat days per county). A coefficient of **{b['log_heat']:.3f}** means about
+  **{(1.10 ** b['log_heat'] - 1) * 100:.1f}% more {outcome.lower()} for every 10% more heat days**
   in a state with average poverty.
 - **Poverty rate** from the Census Bureau, and its **interaction with heat**. A positive interaction
   means heat hits harder where poverty is higher.
@@ -330,9 +342,15 @@ so it isn't confused with Arizona simply being hotter than Maine.
 
 # ================================================================ AI ANALYST
 def build_ai_context() -> str:
-    by_year = panel.groupby("Year").agg(Count=("Count", "sum"), Heat_Events=("EHE", "sum"),
-                                        States=("State", "nunique")).reset_index()
-    by_st = panel.groupby("State").agg(Count=("Count", "sum"), Heat_Events=("EHE", "sum"),
+    by_year = panel.groupby("Year").agg(Count=("Count", "sum"), Population=("Population", "sum"),
+                                        Heat_Days_per_County=("Heat_Days", "mean"),
+                                        States_Reporting=("State", "nunique")).reset_index()
+    by_year["Rate_per_100k"] = by_year["Count"] / by_year.pop("Population") * 1e5
+    peak, low = by_year.loc[by_year["Count"].idxmax()], by_year.loc[by_year["Count"].idxmin()]
+    peak_rate = by_year.loc[by_year["Rate_per_100k"].idxmax()]
+    n = min(3, len(by_year))
+    first, last = by_year.head(n), by_year.tail(n)
+    by_st = panel.groupby("State").agg(Count=("Count", "sum"), Heat_Days_per_County=("Heat_Days", "mean"),
                                        Avg_Rate_per_100k=("Rate_per_100k", "mean"),
                                        Avg_Poverty=("Poverty_Rate", "mean"),
                                        Years_Reported=("Year", "nunique")).reset_index()
@@ -347,8 +365,16 @@ def build_ai_context() -> str:
 - Years: {years[0]}-{years[1]}
 - Age groups: {', '.join(ages) if has_demographics else 'n/a'}; Sex: {', '.join(sexes) if has_demographics else 'n/a'}
 
+Pre-computed facts (use these rather than re-deriving them from the tables):
+- Highest yearly count: {peak['Count']:,.0f} in {peak['Year']:.0f} ({peak['States_Reporting']:.0f} states reporting)
+- Lowest yearly count: {low['Count']:,.0f} in {low['Year']:.0f} ({low['States_Reporting']:.0f} states reporting)
+- Highest yearly rate per 100k: {peak_rate['Rate_per_100k']:.2f} in {peak_rate['Year']:.0f}
+- Average rate per 100k, first {n} years ({first['Year'].min():.0f}-{first['Year'].max():.0f}): {first['Rate_per_100k'].mean():.2f}; last {n} years ({last['Year'].min():.0f}-{last['Year'].max():.0f}): {last['Rate_per_100k'].mean():.2f}
+- States reporting went from {by_year['States_Reporting'].iloc[0]} to {by_year['States_Reporting'].iloc[-1]}, so raw counts partly reflect coverage; rates per 100k correct for this.
+- Heat_Days_per_County = extreme heat days the average county in a state had that year.
+
 Totals by year:
-{by_year.to_csv(index=False)}
+{by_year.round(2).to_csv(index=False)}
 Totals by state (Avg_Rate_per_100k = average of yearly rates):
 {by_st.round(2).to_csv(index=False)}{demo}
 Model coefficients for {outcome} (quasi-Poisson, state and year fixed effects, population offset):
@@ -412,7 +438,7 @@ with tab_ai:
 # ================================================================ NYC
 with tab_nyc:
     st.markdown("A closer look at one city. NYC has dense housing, little tree canopy in places, and sharp "
-                "income gaps between neighborhoods, which makes **where** heat lands very uneven. *(Sidebar filters don't apply to this tab.)*")
+                "income gaps between neighborhoods, which makes **where** heat lands very uneven. *This tab is a fixed 2022 snapshot of New York City, so the sidebar filters (states, years, age, sex) don't change it.*")
     nyc = pd.read_csv("nyc/nyc_heat_er_visits_2022.csv")
     citywide = nyc.loc[nyc["GeoTypeDesc"] == "Citywide", "Age-adjusted rate per 100,000"].iloc[0]
     boroughs = nyc[nyc["GeoTypeDesc"] == "Borough"].rename(columns={
@@ -443,20 +469,28 @@ with tab_methods:
 #### Data
 | Source | What | Level |
 |---|---|---|
-| CDC Environmental Public Health Tracking | Extreme heat events: 2+ consecutive days ≥ 90°F (NOAA) | County-year, summed to state |
+| CDC Environmental Public Health Tracking | Extreme heat days per county (NOAA temperature data) | County-year, averaged to state |
 | CDC Environmental Public Health Tracking | Heat-related hospitalizations and ER visits, by age and sex | State-year |
 | CDC Environmental Public Health Tracking | Heat-related deaths (suppressed when < 10) | State-year |
 | U.S. Census Bureau SAIPE | Poverty rate, all ages, and population | State-year |
 | NYC Environment & Health Data Portal, Landsat 8 | Borough ER visit rates, land surface temperature | Borough, 30 m raster |
 
-Only states that take part in CDC tracking are included (31 for heat events and hospitalizations,
+**About the heat measure.** The CDC extract calls the column "extreme heat events", but its values reach
+194 per county per year. That's impossible for multi-day events, so they are counts of **heat days**. The
+dashboard averages them across counties: a state's value is how many extreme heat days its typical county
+had. Summing instead would count one heat wave once for every county it touched, giving totals like
+"80,000 events" in a year.
+
+Health outcomes are **heat-related** illness only (ICD-coded heat illness), not all hospitalizations.
+
+Only states that take part in CDC tracking are included (31 for heat and hospitalizations,
 30 for ER visits). Results may not generalize to the rest of the country.
 
 #### Model
 `log E[count] = log(population) + β₁·log(1+heat) + β₂·poverty + β₃·log(1+heat)·poverty + state FE + year FE`
 
 This is a quasi-Poisson GLM with standard errors clustered by state, fit separately for each outcome. The
-simulator scales each state's recent average heat events and applies the fitted rate ratio to its
+simulator scales each state's recent average heat days and applies the fitted rate ratio to its
 recent average count.
 
 #### Limitations

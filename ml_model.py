@@ -4,9 +4,9 @@ Heat-health model and climate scenario simulator.
 Model (fit separately for each outcome):
 
     log E[count] = log(population)                       # offset -> models a rate
-                 + b1 * log(1 + heat_events)             # heat dose-response
+                 + b1 * log(1 + heat_days)               # heat dose-response
                  + b2 * poverty_c                        # poverty (centered)
-                 + b3 * log(1 + heat_events) * poverty_c # does poverty amplify heat?
+                 + b3 * log(1 + heat_days) * poverty_c   # does poverty amplify heat?
                  + state fixed effects + year fixed effects
 
 Fit as a quasi-Poisson GLM (variance scaled for overdispersion) with standard
@@ -15,7 +15,9 @@ states (climate, reporting systems); year effects absorb nationwide shocks
 (coding changes, COVID). So b1 and b3 are identified from within-state,
 year-to-year variation in heat.
 
-Because heat enters as log(1 + events), raising heat events by x% multiplies
+heat_days = average extreme heat days per county in the state that year.
+
+Because heat enters as log(1 + days), raising heat days by x% multiplies
 the expected count by roughly (1 + x)^(b1 + b3 * poverty_c): always increasing
 when the slope is positive, with diminishing returns, and steeper in
 higher-poverty states when b3 > 0.
@@ -43,7 +45,7 @@ class HeatHealthModel:
     def coef_table(self) -> pd.DataFrame:
         ci = self.result.conf_int().loc[TERMS]
         return pd.DataFrame({
-            "Term": ["Heat (log events)", "Poverty rate (pts)", "Heat × poverty"],
+            "Term": ["Heat (log heat days)", "Poverty rate (pts)", "Heat × poverty"],
             "Estimate": self.result.params[TERMS].values,
             "CI low": ci[0].values,
             "CI high": ci[1].values,
@@ -63,8 +65,8 @@ class HeatHealthModel:
 
 
 def prepare(panel: pd.DataFrame, poverty_mean: float) -> pd.DataFrame:
-    df = panel.dropna(subset=["Count", "EHE", "Poverty_Rate", "Population"]).copy()
-    df["log_heat"] = np.log1p(df["EHE"])
+    df = panel.dropna(subset=["Count", "Heat_Days", "Poverty_Rate", "Population"]).copy()
+    df["log_heat"] = np.log1p(df["Heat_Days"])
     df["poverty_c"] = df["Poverty_Rate"] - poverty_mean
     return df
 
@@ -81,22 +83,22 @@ def fit_model(panel: pd.DataFrame, outcome: str) -> HeatHealthModel:
 
 def simulate_heat_increase(panel: pd.DataFrame, model: HeatHealthModel,
                            pct_increase: float, recent_years: int = 5) -> pd.DataFrame:
-    """Projected change in a typical recent year if heat events rise by pct_increase %.
+    """Projected change in a typical recent year if extreme heat days rise by pct_increase %.
 
-    For each state, the baseline is its average heat events and outcome count
+    For each state, the baseline is its average heat days and outcome count
     over the last `recent_years` reported years, and its latest poverty rate.
     """
     last = panel["Year"].max()
     recent = panel[panel["Year"] > last - recent_years]
     base = recent.groupby("State").agg(
-        Heat_Events=("EHE", "mean"),
+        Heat_Days=("Heat_Days", "mean"),
         Baseline=("Count", "mean"),
         Poverty_Rate=("Poverty_Rate", "last"),
         Population=("Population", "last"),
     ).reset_index()
 
     factor = 1 + pct_increase / 100
-    dose = np.log1p(base["Heat_Events"] * factor) - np.log1p(base["Heat_Events"])
+    dose = np.log1p(base["Heat_Days"] * factor) - np.log1p(base["Heat_Days"])
     slope, se = model.heat_slope(base["Poverty_Rate"])
     log_rr = slope * dose
     base["Rate_Ratio"] = np.exp(log_rr)
@@ -110,7 +112,7 @@ def simulate_heat_increase(panel: pd.DataFrame, model: HeatHealthModel,
 
 def sensitivity_curve(model: HeatHealthModel, poverty_range, pct_increase: float) -> pd.DataFrame:
     """% change in the outcome from a pct_increase rise in heat, across poverty
-    rates (evaluated where heat events are large, so dose ~= log(1 + x))."""
+    rates (evaluated where heat days are many, so dose ~= log(1 + x))."""
     pov = np.linspace(*poverty_range, 50)
     slope, se = model.heat_slope(pov)
     dose = np.log(1 + pct_increase / 100)
@@ -132,4 +134,4 @@ if __name__ == "__main__":
         print(f"\n=== {outcome}: {m.n_obs} state-years, {m.n_states} states ===")
         print(m.coef_table().round(4).to_string(index=False))
         sim = simulate_heat_increase(panel, m, 50)
-        print(f"+50% heat events -> {sim['Extra'].sum():,.0f} extra per year across these states")
+        print(f"+50% heat days -> {sim['Extra'].sum():,.0f} extra per year across these states")
