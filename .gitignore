@@ -8,3 +8,4 @@ data_external/
 .claude/
 !data/*.csv
 !nyc/*.csv
+.streamlit/secrets.toml
