@@ -8,9 +8,9 @@ poverty makes those effects worse.
 
 | Tab | What it does |
 |---|---|
-| 📊 **Overview** | Headline metrics, heat and health trends, a state map, a state × year heatmap, age/sex breakdown and heat-vs-health scatter. Everything responds to the sidebar filters, and the filtered data can be downloaded as CSV. |
+| 📊 **Overview** | Key findings in plain English (computed from the data and model, not hard-coded), headline metrics, heat and health trends, a state map, a state × year heatmap, age/sex breakdown and heat-vs-health scatter. Everything responds to the sidebar filters, and the filtered data can be downloaded as CSV. |
 | 🌡️ **Heat Scenario Simulator** | Increase extreme heat days by 0–200% and see projected extra cases per state with 95% confidence intervals, plus how the effect changes with a state's poverty rate. |
-| 🤖 **AI Analyst** | Chat with an LLM (via Groq) that sees summary tables of your current filter selection and is told not to guess. |
+| 🤖 **AI Analyst** | Chat with an LLM (via Groq) that sees summary tables of your current filter selection and is told not to guess. Questions are rate-limited per visitor. |
 | 🗽 **NYC Spotlight** | A fixed 2022 snapshot (not affected by the sidebar): borough-level heat-stress ER visits alongside Landsat land-surface-temperature and tree-canopy maps. |
 | 📖 **Methods** | Data sources, model specification and limitations. |
 
@@ -34,6 +34,26 @@ streamlit run app.py
 
 The app opens at http://localhost:8501. Everything except the AI Analyst works without an API key.
 The map tiles load from a CDN, so you need an internet connection.
+
+Run the tests with `pip install -r requirements-dev.txt && pytest`.
+
+## Deploy (Streamlit Community Cloud)
+
+The app runs as-is on [Streamlit Community Cloud](https://share.streamlit.io) (free):
+
+1. Sign in at share.streamlit.io with GitHub and choose **Create app**.
+2. Pick this repository, branch `main`, main file `app.py`. Under **Advanced settings**, choose
+   Python 3.12 or newer.
+3. Optional, for the AI tab: in **Secrets**, paste the contents of
+   [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example) with your real Groq key.
+   Secrets can also be added later under the app's **Settings → Secrets**.
+4. Deploy. Dependencies install from `requirements.txt`.
+
+**Protecting your Groq quota.** On a public URL anyone can use the AI tab, so it is capped:
+each visitor session gets `AI_SESSION_LIMIT` questions (default 10) and the whole app gets
+`AI_DAILY_LIMIT` per day (default 200, resets at midnight UTC or when the app restarts). Set either
+in Secrets to change them. Without a key the AI tab shows a notice and everything else works.
+Never commit `.streamlit/secrets.toml` or `.env`; both are gitignored.
 
 ## Data
 
@@ -95,6 +115,8 @@ Air conditioning isn't available by state and year, so the state fixed effects a
 
 ```
 app.py                  Streamlit dashboard (filters, tabs, charts, Groq chat)
+tests/                  AppTest smoke tests (pytest)
+.streamlit/             Theme (config.toml) and secrets template
 heat_data.py            Loads CDC + Census data into tidy, filterable tables
 ml_model.py             Model fitting, scenario simulation, poverty sensitivity curve
 scripts/build_poverty.py  Builds data/state_poverty.csv from Census SAIPE files
