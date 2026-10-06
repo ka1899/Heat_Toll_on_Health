@@ -46,7 +46,7 @@ def test_empty_selection_warns():
     at.segmented_control(key="outcome").set_value("ER Visits")
     at.multiselect(key="states").set_value(["North Carolina"]).run()  # reports heat, not ER visits
     assert not at.exception
-    assert any("No er visits" in w.value for w in at.warning)
+    assert any("No ER visits" in w.value for w in at.warning)
 
 
 def test_ai_without_key_shows_notice():

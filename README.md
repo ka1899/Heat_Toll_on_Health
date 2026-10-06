@@ -8,7 +8,7 @@ poverty makes those effects worse.
 
 | Tab | What it does |
 |---|---|
-| 📊 **Overview** | Headline metrics, heat and health trends, a state map, a state × year heatmap, age/sex breakdown and heat-vs-health scatter. Everything responds to the sidebar filters, and the filtered data can be downloaded as CSV. |
+| 📊 **Overview** | Key findings in plain English (computed from the data and model, not hard-coded), headline metrics, heat and health trends, a state map, a state × year heatmap, age/sex breakdown and heat-vs-health scatter. Everything responds to the sidebar filters, and the filtered data can be downloaded as CSV. |
 | 🌡️ **Heat Scenario Simulator** | Increase extreme heat days by 0–200% and see projected extra cases per state with 95% confidence intervals, plus how the effect changes with a state's poverty rate. |
 | 🤖 **AI Analyst** | Chat with an LLM (via Groq) that sees summary tables of your current filter selection and is told not to guess. Questions are rate-limited per visitor. |
 | 🗽 **NYC Spotlight** | A fixed 2022 snapshot (not affected by the sidebar): borough-level heat-stress ER visits alongside Landsat land-surface-temperature and tree-canopy maps. |

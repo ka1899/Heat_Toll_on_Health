@@ -20,6 +20,11 @@ SEX_COLORS = alt.Scale(domain=["Female", "Male"], range=["#e8590c", "#1c7ed6"])
 AGES = [AGE_LABELS[a] for a in AGE_ORDER]
 
 
+def noun(outcome: str) -> str:
+    """Outcome name for use mid-sentence: 'hospitalizations', 'ER visits'."""
+    return outcome.lower().replace("er visits", "ER visits")
+
+
 def compact(n: float) -> str:
     """106509 -> '106.5K' so headline numbers fit their cards."""
     for div, suffix in ((1e6, "M"), (1e3, "K")):
@@ -38,6 +43,16 @@ def load_all():
 def get_model(outcome: str):
     outcomes, heat, poverty = load_all()
     return fit_model(state_year_panel(outcomes, heat, poverty, outcome), outcome)
+
+
+@st.cache_data
+def load_nyc():
+    """2022 NYC heat-stress ER visits: (citywide age-adjusted rate, borough table)."""
+    nyc = pd.read_csv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "nyc", "nyc_heat_er_visits_2022.csv"))
+    citywide = nyc.loc[nyc["GeoTypeDesc"] == "Citywide", "Age-adjusted rate per 100,000"].iloc[0]
+    boroughs = nyc[nyc["GeoTypeDesc"] == "Borough"].rename(columns={
+        "Age-adjusted rate per 100,000": "Rate", "Number": "Visits"})
+    return citywide, boroughs
 
 
 outcomes_df, heat_df, poverty_df = load_all()
@@ -83,13 +98,27 @@ heat_filtered = heat_df[heat_df["State"].isin(selected_states) & heat_df["Year"]
 panel = state_year_panel(filtered, heat_filtered, poverty_df, outcome)
 
 # ---------------------------------------------------------------- header
-st.title("🔥 Heat's Toll on Health")
 scope = "all states" if not states else (", ".join(states) if len(states) <= 3 else f"{len(states)} states")
-label = f"heat-related {outcome.lower()}"
-st.markdown(f"Extreme heat and **{label}** · {scope} · {years[0]}–{years[1]}")
+label = f"heat-related {noun(outcome)}"
+# The one piece of custom CSS: a hero banner the theme can't express. Scoped to our own class names.
+st.html(f"""
+<style>
+  .hero {{ background: linear-gradient(120deg, #7c2d12 0%, #c2410c 55%, #f59e0b 100%); color: #fff;
+           border-radius: 0.9rem; padding: 1.4rem 1.6rem 1.2rem; }}
+  .hero h1 {{ margin: 0; font-size: 2.1rem; font-weight: 700; line-height: 1.15; color: #fff; }}
+  .hero p {{ margin: 0.45rem 0 0; font-size: 1rem; opacity: 0.92; max-width: 52rem; }}
+  .hero .scope {{ display: inline-block; margin-top: 0.8rem; padding: 0.2rem 0.7rem; border-radius: 999px;
+                  background: rgba(255,255,255,0.18); font-size: 0.85rem; font-weight: 500; }}
+</style>
+<div class="hero">
+  <h1>🔥 Heat's Toll on Health</h1>
+  <p>How extreme heat days relate to heat-related hospitalizations, ER visits and deaths across U.S. states,
+     2000–2022, using CDC and Census data.</p>
+  <span class="scope">Showing {label} · {scope} · {years[0]}–{years[1]}</span>
+</div>""")
 
 if panel.empty:
-    st.warning(f"No {outcome.lower()} are reported for this selection. Try other states or years.")
+    st.warning(f"No {noun(outcome)} are reported for this selection. Try other states or years.")
     st.stop()
 
 tab_overview, tab_sim, tab_ai, tab_nyc, tab_methods = st.tabs(
@@ -98,7 +127,58 @@ tab_overview, tab_sim, tab_ai, tab_nyc, tab_methods = st.tabs(
 color = OUTCOME_COLORS[outcome]
 
 # ================================================================ OVERVIEW
+def key_findings() -> list[tuple[str, str]]:
+    """(headline, explanation) pairs, all computed from the data and fitted models."""
+    findings = []
+    model = get_model(outcome)
+    b, ci = model.result.params["log_heat"], model.result.conf_int().loc["log_heat"]
+    per10 = lambda x: (1.10 ** x - 1) * 100  # % change in cases for +10% heat days
+    others = [f"{noun(o)} {per10(get_model(o).result.params['log_heat']):+.1f}%"
+              for o in OUTCOMES if o != outcome]
+    findings.append((f"{per10(b):+.1f}% {noun(outcome)}",
+                     f"for every 10% more extreme heat days in a state (95% CI {per10(ci[0]):+.1f}% to "
+                     f"{per10(ci[1]):+.1f}%), comparing each state with itself across years. "
+                     f"Same comparison: {' and '.join(others)}."))
+
+    p_int = model.result.pvalues["log_heat:poverty_c"]
+    if p_int < 0.05:
+        direction = "harder" if model.result.params["log_heat:poverty_c"] > 0 else "less hard"
+        findings.append(("Poverty amplifies heat", f"In this data, heat hits {direction} in higher-poverty states "
+                                                   f"(heat × poverty p = {p_int:.3f})."))
+    else:
+        findings.append(("No poverty amplifier found",
+                         f"State poverty rates don't measurably change how hard heat hits {noun(outcome)} "
+                         f"(heat × poverty p = {p_int:.2f}). Statewide averages may be too coarse; "
+                         "see the NYC tab for a neighborhood view."))
+
+    if has_demographics and not filtered.empty:
+        by_sex = filtered.groupby("Sex")["Count"].sum()
+        by_age = filtered.groupby("Age_Group")["Count"].sum()
+        top_sex, top_age = by_sex.idxmax(), by_age.idxmax()
+        findings.append((f"{by_sex[top_sex] / by_sex.sum():.0%} {'men' if top_sex == 'Male' else 'women'}",
+                         f"of {label} in your selection. The {top_age} age group accounts for the most cases "
+                         f"({by_age[top_age] / by_age.sum():.0%})."))
+    else:
+        worst = panel.groupby("State")["Rate_per_100k"].mean().idxmax()
+        findings.append((worst, f"has the highest average yearly rate of {label} per 100k in your selection."))
+
+    citywide, boroughs = load_nyc()
+    top = boroughs.nlargest(1, "Rate").iloc[0]
+    findings.append((f"{top['Rate'] / citywide:.1f}× in the {top['Borough']}",
+                     f"Heat-stress ER visits in the {top['Borough']} ran {top['Rate'] / citywide:.1f} times the "
+                     f"New York City average in 2022 (age-adjusted)."))
+    return findings
+
+
 with tab_overview:
+    st.markdown("#### Key findings")
+    for col, (headline, text) in zip(st.columns(4), key_findings()):
+        with col.container(border=True, height="stretch"):
+            st.markdown(f"**:orange[{headline}]**")
+            st.caption(text)
+    st.caption("The first two findings come from the statistical model on all states and years (see the "
+               "simulator tab); the third follows your filters; the fourth is the NYC snapshot.")
+
     yearly = panel.groupby("Year").agg(Count=("Count", "sum"), Population=("Population", "sum"),
                                        States=("State", "nunique")).reset_index()
     # Heat for the selection = average heat days across all counties in the reporting states
@@ -139,7 +219,7 @@ with tab_overview:
         tooltip=["Year", alt.Tooltip("Count:Q", title=outcome, format=","),
                  alt.Tooltip("Rate:Q", title="Per 100k", format=".2f"),
                  alt.Tooltip("States:Q", title="States reporting")]
-    ).properties(height=200, title=f"Heat-related {outcome.lower()} per 100k residents")
+    ).properties(height=200, title=f"Heat-related {noun(outcome)} per 100k residents")
     st.altair_chart(alt.vconcat(heat_trend, rate_trend, spacing=8).resolve_scale(x="shared"), width="stretch")
 
     # --- map + ranking
@@ -185,7 +265,7 @@ with tab_overview:
         ).properties(height=380), width="stretch")
 
     # --- state x year heatmap
-    st.markdown(f"**Heat-related {outcome.lower()} per 100k by state and year**")
+    st.markdown(f"**Heat-related {noun(outcome)} per 100k by state and year**")
     order = by_state.sort_values("Rate", ascending=False)["State"].tolist()
     st.altair_chart(alt.Chart(panel).mark_rect().encode(
         x=alt.X("Year:O", title=None, axis=alt.Axis(labelAngle=0)),
@@ -255,7 +335,7 @@ with tab_sim:
     else:
         extra, baseline = sim["Extra"].sum(), sim["Baseline"].sum()
         s1, s2, s3 = st.columns(3)
-        s1.metric(f"Extra {outcome.lower()} per year", f"+{extra:,.0f}", border=True,
+        s1.metric(f"Extra {noun(outcome)} per year", f"+{extra:,.0f}", border=True,
                   help="Approximate 95% range: "
                        f"{sim['Extra_low'].sum():,.0f} to {sim['Extra_high'].sum():,.0f}")
         s2.metric("Change vs. today", f"{extra / baseline * 100:+.1f}%", border=True,
@@ -266,10 +346,10 @@ with tab_sim:
 
         c1, c2 = st.columns([3, 2])
         with c1:
-            st.markdown(f"**Projected extra {outcome.lower()} per year, by state**")
+            st.markdown(f"**Projected extra {noun(outcome)} per year, by state**")
             bars = alt.Chart(sim).encode(y=alt.Y("State:N", sort="-x", title=None))
             st.altair_chart((bars.mark_bar().encode(
-                x=alt.X("Extra:Q", title=f"Extra {outcome.lower()} per year"),
+                x=alt.X("Extra:Q", title=f"Extra {noun(outcome)} per year"),
                 color=alt.Color("Poverty_Rate:Q", scale=alt.Scale(scheme="purples"), title="Poverty %",
                                 legend=alt.Legend(orient="top")),
                 tooltip=["State", alt.Tooltip("Baseline:Q", format=",.0f"),
@@ -288,7 +368,7 @@ with tab_sim:
                                               poverty_df["Poverty_Rate"].quantile(0.98)), pct)
             band = alt.Chart(curve).mark_area(opacity=0.2, color=color).encode(
                 x=alt.X("Poverty_Rate:Q", title="State poverty rate (%)", scale=alt.Scale(zero=False)),
-                y=alt.Y("Low:Q", title=f"% change in {outcome.lower()}"), y2="High:Q")
+                y=alt.Y("Low:Q", title=f"% change in {noun(outcome)}"), y2="High:Q")
             line = alt.Chart(curve).mark_line(color=color).encode(x="Poverty_Rate:Q", y="Pct_Change:Q")
             dots = alt.Chart(sim).mark_circle(size=45, color="#495057").encode(
                 x="Poverty_Rate:Q", y="Pct_Change:Q",
@@ -300,7 +380,7 @@ with tab_sim:
                        else "not a statistically significant amplifier")
             st.caption(f"Line: % change at a +{pct}% heat increase for a state with that poverty rate "
                        f"(shaded: 95% CI). Dots: individual states. Dots near zero are states with very few heat "
-                       f"days, where a percentage increase adds little. For {outcome.lower()}, poverty is "
+                       f"days, where a percentage increase adds little. For {noun(outcome)}, poverty is "
                        f"{verdict} (p = {p_int:.3f}).")
 
         with st.expander("Projection table"):
@@ -319,10 +399,10 @@ with tab_sim:
     with st.expander("How the model works"):
         b = model.result.params
         st.markdown(f"""
-For each state and year, the model predicts the **{outcome.lower()} rate** from:
+For each state and year, the model predicts the **{noun(outcome)} rate** from:
 
 - **Heat:** log(1 + extreme heat days per county). A coefficient of **{b['log_heat']:.3f}** means about
-  **{(1.10 ** b['log_heat'] - 1) * 100:.1f}% more {outcome.lower()} for every 10% more heat days**
+  **{(1.10 ** b['log_heat'] - 1) * 100:.1f}% more {noun(outcome)} for every 10% more heat days**
   in a state with average poverty.
 - **Poverty rate** from the Census Bureau, and its **interaction with heat**. A positive interaction
   means heat hits harder where poverty is higher.
@@ -484,10 +564,7 @@ with tab_ai:
 with tab_nyc:
     st.markdown("A closer look at one city. NYC has dense housing, little tree canopy in places, and sharp "
                 "income gaps between neighborhoods, which makes **where** heat lands very uneven. *This tab is a fixed 2022 snapshot of New York City, so the sidebar filters (states, years, age, sex) don't change it.*")
-    nyc = pd.read_csv("nyc/nyc_heat_er_visits_2022.csv")
-    citywide = nyc.loc[nyc["GeoTypeDesc"] == "Citywide", "Age-adjusted rate per 100,000"].iloc[0]
-    boroughs = nyc[nyc["GeoTypeDesc"] == "Borough"].rename(columns={
-        "Age-adjusted rate per 100,000": "Rate", "Number": "Visits"})
+    citywide, boroughs = load_nyc()
 
     n1, n2 = st.columns([2, 3])
     with n1:
