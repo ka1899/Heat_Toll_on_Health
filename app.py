@@ -381,6 +381,34 @@ Model coefficients for {outcome} (quasi-Poisson, state and year fixed effects, p
 {model.coef_table().round(4).to_csv(index=False)}"""
 
 
+def get_setting(name: str, default: str = "") -> str:
+    """Streamlit secrets (Community Cloud) first, then environment / .env."""
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:  # no secrets.toml at all
+        pass
+    return os.environ.get(name, default)
+
+
+AI_SESSION_LIMIT = int(get_setting("AI_SESSION_LIMIT", "10"))  # questions per visitor session
+AI_DAILY_LIMIT = int(get_setting("AI_DAILY_LIMIT", "200"))     # questions per day, all visitors
+AI_HISTORY_TURNS = 6                                            # past messages sent with each question
+
+
+@st.cache_resource
+def ai_usage() -> dict:
+    """App-wide question counter, shared by every visitor of this server process."""
+    return {"day": None, "count": 0}
+
+
+def daily_remaining() -> int:
+    usage, today = ai_usage(), pd.Timestamp.now(tz="UTC").date()
+    if usage["day"] != today:
+        usage.update(day=today, count=0)
+    return AI_DAILY_LIMIT - usage["count"]
+
+
 def queue_suggestion():
     # Send a clicked suggestion once, then clear the pill so reruns don't resend it
     st.session_state.pending_prompt = st.session_state.suggestion
@@ -390,19 +418,34 @@ def queue_suggestion():
 with tab_ai:
     st.markdown("Ask questions about the data **currently selected in the sidebar**. "
                 "The assistant only sees the summary tables below.")
-    api_key = os.environ.get("GROQ_API_KEY", "")
-    groq_model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+    api_key = get_setting("GROQ_API_KEY")
+    groq_model = get_setting("GROQ_MODEL", "openai/gpt-oss-120b")
     context = build_ai_context()
     with st.expander("What the assistant can see"):
         st.code(context, language=None)
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    st.session_state.setdefault("messages", [])
+    st.session_state.setdefault("ai_questions", 0)
+    session_left = AI_SESSION_LIMIT - st.session_state.ai_questions
+    chat_enabled = bool(api_key) and session_left > 0 and daily_remaining() > 0
+
+    if not api_key:
+        st.info("The AI Analyst is turned off because no Groq API key is configured. Everything else in the "
+                "dashboard works without it. To turn it on, add `GROQ_API_KEY` to `.env` (local) or to the "
+                "app's Secrets (Streamlit Community Cloud).", icon="🔑")
+    elif not chat_enabled:
+        reason = ("You've used all the questions for this session." if session_left <= 0
+                  else "The dashboard has reached its shared daily limit for AI questions.")
+        st.warning(f"{reason} The rest of the dashboard still works. Check back later, or run the app "
+                   "locally with your own free Groq key (see the README).", icon="⏳")
+    else:
+        st.caption(f"{session_left} of {AI_SESSION_LIMIT} questions left in this session.")
+
     st.pills("Try asking", [
         "Which state has the highest rate, and how does its poverty compare?",
         "How have cases changed since the early 2000s?",
         "Explain the model results in plain language.",
-    ], key="suggestion", on_change=queue_suggestion)
+    ], key="suggestion", on_change=queue_suggestion, disabled=not chat_enabled)
     if st.button("Clear chat", type="tertiary"):
         st.session_state.messages = []
 
@@ -410,30 +453,32 @@ with tab_ai:
     for m in st.session_state.messages:
         chat.chat_message(m["role"]).markdown(m["content"])
 
-    prompt = st.chat_input("Ask about heat and health in your selection…") or st.session_state.pop("pending_prompt", None)
-    if prompt:
+    prompt = (st.chat_input("Ask about heat and health in your selection…", max_chars=500,
+                            disabled=not chat_enabled)
+              or st.session_state.pop("pending_prompt", None))
+    if prompt and chat_enabled:
         chat.chat_message("user").markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
-        if not api_key:
-            answer = "⚠️ Add `GROQ_API_KEY` to a `.env` file to enable the assistant (see `.env.example`)."
-        else:
-            system = ("You are a careful public-health data analyst inside a dashboard about extreme heat and "
-                      "heat-related health outcomes in US states (CDC Environmental Public Health Tracking, "
-                      "Census SAIPE poverty). Answer ONLY from the data below. If the answer is not in the "
-                      "data, say so plainly; never invent numbers. Quote the figures you use in plain text (no citation brackets). Keep answers "
-                      "concise. Remember: states report different years, so raw yearly totals partly reflect "
-                      "reporting coverage. Prefer rates per 100k when comparing.\n\n" + context)
-            history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
-            try:
-                with chat, st.spinner("Thinking…"):
-                    reply = groq.Groq(api_key=api_key).chat.completions.create(
-                        model=groq_model, temperature=0.2,
-                        messages=[{"role": "system", "content": system}] + history)
-                answer = reply.choices[0].message.content
-            except Exception as e:
-                answer = f"Error contacting Groq ({groq_model}): {e}"
-        chat.chat_message("assistant").markdown(answer)
+        st.session_state.ai_questions += 1
+        ai_usage()["count"] += 1
+        system = ("You are a careful public-health data analyst inside a dashboard about extreme heat and "
+                  "heat-related health outcomes in US states (CDC Environmental Public Health Tracking, "
+                  "Census SAIPE poverty). Answer ONLY from the data below. If the answer is not in the "
+                  "data, say so plainly; never invent numbers. Quote the figures you use in plain text (no citation brackets). Keep answers "
+                  "concise. Remember: states report different years, so raw yearly totals partly reflect "
+                  "reporting coverage. Prefer rates per 100k when comparing.\n\n" + context)
+        history = [{"role": m["role"], "content": m["content"]}
+                   for m in st.session_state.messages[-AI_HISTORY_TURNS:]]
+        try:
+            with chat, st.spinner("Thinking…"):
+                reply = groq.Groq(api_key=api_key).chat.completions.create(
+                    model=groq_model, temperature=0.2,
+                    messages=[{"role": "system", "content": system}] + history)
+            answer = reply.choices[0].message.content
+        except Exception as e:
+            answer = f"Error contacting Groq ({groq_model}): {e}"
         st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.rerun()  # redraw with the answer and the updated question count
 
 # ================================================================ NYC
 with tab_nyc:
